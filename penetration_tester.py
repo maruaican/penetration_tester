@@ -184,13 +184,17 @@ def scan_url(url):
             test_url = parsed_url._replace(query=test_query).geturl()
             try:
                 test_response = requests.get(test_url, timeout=5)
+                # サニタイズされていない生のスクリプトタグのみ検出
+                # サニタイズされた文字列(<など)が含まれていないことを確認
                 if "<script>alert(1)</script>" in test_response.text:
-                    report['vulnerabilities'].append({
-                        'type': 'XSS（クロスサイトスクリプティング）',
-                        'url': test_url,
-                        'confidence': '高',
-                        'description': 'スクリプトタグがそのまま反映されました'
-                    })
+                    # サニタイズされたバージョンが含まれていないことを確認
+                    if "<script>alert(1)</script>" not in test_response.text:
+                        report['vulnerabilities'].append({
+                            'type': 'XSS（クロスサイトスクリプティング）',
+                            'url': test_url,
+                            'confidence': '高',
+                            'description': 'スクリプトタグがそのまま反映されました'
+                        })
             except:
                 pass
             
@@ -199,15 +203,300 @@ def scan_url(url):
             test_url = parsed_url._replace(query=test_query).geturl()
             try:
                 test_response = requests.get(test_url, timeout=5)
+                # サニタイズされていないイベントハンドラーのみ検出
+                # サニタイズされた文字列(<など)が含まれていないことを確認
                 if "<img src=x onerror=alert(1)>" in test_response.text:
-                    report['vulnerabilities'].append({
-                        'type': 'DOM Based XSS',
-                        'url': test_url,
-                        'confidence': '高',
-                        'description': 'DOMベースXSSの可能性が検出されました'
-                    })
+                    # サニタイズされたバージョンが含まれていないことを確認
+                    if "<img src=x onerror=alert(1)>" not in test_response.text:
+                        report['vulnerabilities'].append({
+                            'type': 'DOM Based XSS',
+                            'url': test_url,
+                            'confidence': '高',
+                            'description': 'DOMベースXSSの可能性が検出されました'
+                        })
             except:
                 pass
+        
+        # CSRF脆弱性チェック
+        try:
+            # フォームページを取得
+            forms_response = requests.get(urljoin(url, 'form'), timeout=5)
+            if forms_response.status_code == 200:
+                # CSRFトークンの存在を確認
+                if 'csrf' not in forms_response.text.lower() and 'token' not in forms_response.text.lower():
+                    report['vulnerabilities'].append({
+                        'type': 'CSRF（クロスサイトリクエストフォージェリ）',
+                        'url': urljoin(url, 'form'),
+                        'confidence': '中',
+                        'description': 'CSRFトークンがフォームに存在しない可能性があります'
+                    })
+        except:
+            pass
+        
+        # セッション管理チェック
+        try:
+            # ログインページにアクセスしてセッションCookieを取得
+            login_response = requests.get(urljoin(url, 'login'), timeout=5)
+            if login_response.status_code == 200:
+                # セッションCookieの存在を確認
+                session_cookie = login_response.cookies.get('session')
+                if session_cookie:
+                    # Cookieの属性を確認
+                    cookie_attrs = login_response.cookies.get_dict()
+                    session_cookie_attrs = str(login_response.cookies)
+                    
+                    # Secureフラグの確認
+                    if 'Secure' not in session_cookie_attrs:
+                        report['vulnerabilities'].append({
+                            'type': 'セッション管理脆弱性',
+                            'url': urljoin(url, 'login'),
+                            'confidence': '中',
+                            'description': 'セッションCookieにSecureフラグが設定されていません'
+                        })
+                    
+                    # HttpOnlyフラグの確認
+                    if 'HttpOnly' not in session_cookie_attrs:
+                        report['vulnerabilities'].append({
+                            'type': 'セッション管理脆弱性',
+                            'url': urljoin(url, 'login'),
+                            'confidence': '中',
+                            'description': 'セッションCookieにHttpOnlyフラグが設定されていません'
+                        })
+                    
+                    # SameSite属性の確認
+                    if 'SameSite' not in session_cookie_attrs:
+                        report['vulnerabilities'].append({
+                            'type': 'セッション管理脆弱性',
+                            'url': urljoin(url, 'login'),
+                            'confidence': '中',
+                            'description': 'セッションCookieにSameSite属性が設定されていません'
+                        })
+        except:
+            pass
+        
+        # ディレクトリトラバーサル脆弱性チェック
+        try:
+            # ディレクトリトラバーサルのパターンを含むリクエストを送信
+            traversal_patterns = ['../etc/passwd', '..\\windows\\system32\\drivers\\etc\\hosts']
+            for pattern in traversal_patterns:
+                test_url = urljoin(url, pattern)
+                traversal_response = requests.get(test_url, timeout=5)
+                if traversal_response.status_code == 200:
+                    # 機密ファイルの内容が含まれているか確認
+                    if 'root:' in traversal_response.text or '[drivers]' in traversal_response.text:
+                        report['vulnerabilities'].append({
+                            'type': 'ディレクトリトラバーサル',
+                            'url': test_url,
+                            'confidence': '高',
+                            'description': 'ディレクトリトラバーサルにより機密ファイルにアクセス可能'
+                        })
+                        break
+        except:
+            pass
+        
+        # コマンドインジェクション脆弱性チェック
+        try:
+            # コマンドチェーン演算子を含むリクエストを送信
+            command_patterns = ['| whoami', '; whoami', '& whoami']
+            for pattern in command_patterns:
+                # GETパラメータにパターンを追加
+                parsed_url = urlparse(url)
+                query_params = parse_qs(parsed_url.query)
+                # 既存のパラメータにパターンを追加
+                if query_params:
+                    # 最初のパラメータにパターンを追加
+                    first_param = list(query_params.keys())[0]
+                    query_params[first_param] = [query_params[first_param][0] + pattern]
+                    # 新しいクエリ文字列を構築
+                    new_query = '&'.join([f"{k}={v[0]}" for k, v in query_params.items()])
+                    test_url = parsed_url._replace(query=new_query).geturl()
+                else:
+                    # パラメータがない場合は適当なパラメータを追加
+                    test_url = url + "?cmd=" + pattern
+                
+                command_response = requests.get(test_url, timeout=5)
+                if command_response.status_code == 200:
+                    # コマンド実行結果が含まれているか確認
+                    if 'root' in command_response.text or 'user' in command_response.text:
+                        report['vulnerabilities'].append({
+                            'type': 'コマンドインジェクション',
+                            'url': test_url,
+                            'confidence': '高',
+                            'description': 'コマンドインジェクションにより外部コマンドが実行可能'
+                        })
+                        break
+        except:
+            pass
+        
+        # XXE脆弱性チェック
+        try:
+            # XXEテスト用のXMLデータ
+            xxe_payload = '''<?xml version="1.0" encoding="ISO-8859-1"?>
+            <!DOCTYPE foo [
+            <!ELEMENT foo ANY >
+            <!ENTITY xxe SYSTEM "file:///etc/passwd" >]><foo>&xxe;</foo>'''
+            
+            # XMLデータを含むPOSTリクエストを送信
+            xxe_response = requests.post(url, data=xxe_payload, headers={'Content-Type': 'application/xml'}, timeout=5)
+            if xxe_response.status_code == 200:
+                # XXEの結果が含まれているか確認
+                if 'root:' in xxe_response.text:
+                    report['vulnerabilities'].append({
+                        'type': 'XXE（XML External Entity）',
+                        'url': url,
+                        'confidence': '高',
+                        'description': 'XXE脆弱性によりローカルファイルにアクセス可能'
+                    })
+        except:
+            pass
+        
+        # SSRF脆弱性チェック
+        try:
+            # SSRFテスト用のペイロード
+            ssrf_payloads = [
+                'http://169.254.169.254/latest/meta-data/',  # AWS metadata
+                'http://100.100.100.200/latest/meta-data/',  # Alibaba Cloud metadata
+                'http://metadata.google.internal/computeMetadata/v1/',  # Google Cloud metadata
+                'http://127.0.0.1:22'  # Local SSH service
+            ]
+            
+            for payload in ssrf_payloads:
+                # URLパラメータにペイロードを含むリクエストを送信
+                test_url = url + "?url=" + payload
+                ssrf_response = requests.get(test_url, timeout=5)
+                if ssrf_response.status_code == 200:
+                    # 特定のキーワードが含まれているか確認
+                    if 'ssh' in ssrf_response.text.lower() or 'meta-data' in ssrf_response.text.lower():
+                        report['vulnerabilities'].append({
+                            'type': 'SSRF（Server-Side Request Forgery）',
+                            'url': test_url,
+                            'confidence': '高',
+                            'description': 'SSRF脆弱性により内部サービスにアクセス可能'
+                        })
+                        break
+        except:
+            pass
+        
+        # CORS設定チェック
+        try:
+            # Originヘッダーを含むリクエストを送信
+            cors_response = requests.get(url, headers={'Origin': 'http://evil.com'}, timeout=5)
+            # Access-Control-Allow-Originヘッダーを確認
+            allow_origin = cors_response.headers.get('Access-Control-Allow-Origin')
+            if allow_origin == '*':
+                report['vulnerabilities'].append({
+                    'type': 'CORS（Cross-Origin Resource Sharing）',
+                    'url': url,
+                    'confidence': '中',
+                    'description': 'Access-Control-Allow-Originが*に設定されています'
+                })
+            elif allow_origin == 'http://evil.com':
+                report['vulnerabilities'].append({
+                    'type': 'CORS（Cross-Origin Resource Sharing）',
+                    'url': url,
+                    'confidence': '高',
+                    'description': '任意のOriginが許可されています'
+                })
+        except:
+            pass
+        
+        # キャッシュヘッダー設定チェック
+        try:
+            cache_response = requests.get(url, timeout=5)
+            cache_control = cache_response.headers.get('Cache-Control')
+            pragma = cache_response.headers.get('Pragma')
+            
+            # Cache-Controlヘッダーの確認
+            if not cache_control:
+                report['vulnerabilities'].append({
+                    'type': 'キャッシュヘッダー設定',
+                    'url': url,
+                    'confidence': '中',
+                    'description': 'Cache-Controlヘッダーが設定されていません'
+                })
+            elif 'no-store' not in cache_control and 'no-cache' not in cache_control:
+                # 機密情報を含むページの可能性を考慮
+                if 'login' in url or 'admin' in url:
+                    report['vulnerabilities'].append({
+                        'type': 'キャッシュヘッダー設定',
+                        'url': url,
+                        'confidence': '中',
+                        'description': '機密情報ページのキャッシュ制御が不十分です'
+                    })
+            
+            # Pragmaヘッダーの確認
+            if not pragma:
+                report['vulnerabilities'].append({
+                    'type': 'キャッシュヘッダー設定',
+                    'url': url,
+                    'confidence': '中',
+                    'description': 'Pragmaヘッダーが設定されていません'
+                })
+            elif 'no-cache' not in pragma:
+                # 機密情報を含むページの可能性を考慮
+                if 'login' in url or 'admin' in url:
+                    report['vulnerabilities'].append({
+                        'type': 'キャッシュヘッダー設定',
+                        'url': url,
+                        'confidence': '中',
+                        'description': '機密情報ページのキャッシュ制御が不十分です'
+                    })
+        except:
+            pass
+        
+        # クリックジャッキング対策追加チェック
+        try:
+            frame_response = requests.get(url, timeout=5)
+            x_frame_options = frame_response.headers.get('X-Frame-Options')
+            
+            # X-Frame-Optionsヘッダーの確認
+            if not x_frame_options:
+                report['vulnerabilities'].append({
+                    'type': 'クリックジャッキング対策',
+                    'url': url,
+                    'confidence': '中',
+                    'description': 'X-Frame-Optionsヘッダーが設定されていません'
+                })
+            elif x_frame_options not in ['DENY', 'SAMEORIGIN']:
+                report['vulnerabilities'].append({
+                    'type': 'クリックジャッキング対策',
+                    'url': url,
+                    'confidence': '中',
+                    'description': 'X-Frame-Optionsヘッダーの値が適切ではありません'
+                })
+        except:
+            pass
+        
+        # セキュアCookie設定チェック
+        try:
+            # ログインページにアクセスしてセッションCookieを取得
+            login_response = requests.get(urljoin(url, 'login'), timeout=5)
+            if login_response.status_code == 200:
+                # セッションCookieの存在を確認
+                session_cookie = login_response.cookies.get('session')
+                if session_cookie:
+                    # Cookieの属性を確認
+                    cookie_attrs = str(login_response.cookies)
+                    
+                    # Secureフラグの確認
+                    if 'Secure' not in cookie_attrs:
+                        report['vulnerabilities'].append({
+                            'type': 'セキュアCookie設定',
+                            'url': urljoin(url, 'login'),
+                            'confidence': '中',
+                            'description': 'セッションCookieにSecureフラグが設定されていません'
+                        })
+                    
+                    # HttpOnlyフラグの確認
+                    if 'HttpOnly' not in cookie_attrs:
+                        report['vulnerabilities'].append({
+                            'type': 'セキュアCookie設定',
+                            'url': urljoin(url, 'login'),
+                            'confidence': '中',
+                            'description': 'セッションCookieにHttpOnlyフラグが設定されていません'
+                        })
+        except:
+            pass
         
         # ファイルアップロード脆弱性チェック
         upload_url = urljoin(url, 'upload.php')
